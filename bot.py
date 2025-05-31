@@ -1,9 +1,8 @@
 import os
 import uuid
 import logging
+import requests
 from flask import Flask, request, send_from_directory
-from telegram import Update, Bot
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
 # Configure logging
 logging.basicConfig(
@@ -16,6 +15,8 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 MEDIA_FOLDER = "media"
 PORT = int(os.environ.get("PORT", 5000))
+ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
+BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-service-name.onrender.com').rstrip('/')
 
 # Ensure media folder exists
 os.makedirs(MEDIA_FOLDER, exist_ok=True)
@@ -23,115 +24,124 @@ os.makedirs(MEDIA_FOLDER, exist_ok=True)
 # Create Flask app
 app = Flask(__name__)
 
-# Create bot instance
-bot = Bot(token=TOKEN)
-
-# Initialize application
-application = Application.builder().token(TOKEN).build()
-
-# Define handlers
-def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def telegram_request(method, data=None):
+    """Make synchronous request to Telegram API"""
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
     try:
-        message = update.message
-        
-        # Determine file type
-        if message.video:
-            file_obj = message.video
-        elif message.document and message.document.mime_type.startswith('video/'):
-            file_obj = message.document
-        else:
-            context.bot.send_message(chat_id=message.chat_id, text="Please send a video file")
-            return
-
-        # Generate unique filename
-        file_name = file_obj.file_name or "video"
-        file_ext = os.path.splitext(file_name)[1] if '.' in file_name else '.mp4'
-        unique_filename = f"{uuid.uuid4()}{file_ext}"
-        
-        # Download file to server
-        tg_file = bot.get_file(file_obj.file_id)
-        file_path = os.path.join(MEDIA_FOLDER, unique_filename)
-        tg_file.download(custom_path=file_path)
-        
-        # Get base URL
-        base_url = os.getenv('RENDER_EXTERNAL_URL', request.host_url.rstrip('/'))
-        stream_url = f"{base_url}/media/{unique_filename}"
-        
-        # Create response
-        response = (
-            "🎬 VLC Streaming Link:\n\n"
-            f"{stream_url}\n\n"
-            "1. Open VLC Player\n"
-            "2. Media > Open Network Stream\n"
-            "3. Paste above URL\n"
-            "4. Click Play"
-        )
-        
-        context.bot.send_message(chat_id=message.chat_id, text=response)
-        
+        response = requests.post(url, json=data, timeout=10)
+        return response.json()
     except Exception as e:
-        logger.error(f"Error: {e}")
-        context.bot.send_message(chat_id=message.chat_id, text="❌ Error processing video")
+        logger.error(f"Telegram API error: {e}")
+        return None
 
-def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.bot.send_message(
-        chat_id=update.message.chat_id,
-        text="📹 Send me any video file to get a VLC streaming link!"
-    )
+def download_file(file_id, file_path):
+    """Download file from Telegram"""
+    try:
+        # Get file path
+        file_info = telegram_request("getFile", {"file_id": file_id})
+        if not file_info or not file_info.get('ok'):
+            return False
+            
+        file_path_tg = file_info['result']['file_path']
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path_tg}"
+        
+        # Download file
+        response = requests.get(file_url, stream=True, timeout=30)
+        if response.status_code == 200:
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(1024):
+                    f.write(chunk)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        return False
 
-# Register handlers
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(MessageHandler(
-    filters.VIDEO | (filters.ATTACHMENT & filters.Document.MimeType("video/*")),
-    handle_video
-))
-
-# Flask route for serving media files
-@app.route('/media/<filename>')
-def serve_media(filename):
-    return send_from_directory(MEDIA_FOLDER, filename)
-
-# Flask route for Telegram webhook
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.json, bot)
-    application.process_update(update)
-    return 'OK', 200
+    """Handle Telegram updates"""
+    try:
+        data = request.json
+        message = data.get('message', {})
+        chat_id = message.get('chat', {}).get('id')
+        
+        # Handle /start command
+        if message.get('text') == '/start':
+            telegram_request("sendMessage", {
+                "chat_id": chat_id,
+                "text": "📹 Send me any video file to get a VLC streaming link!"
+            })
+            return 'OK'
+        
+        # Handle video files
+        video = message.get('video') or message.get('document')
+        if video and video.get('mime_type', '').startswith('video/'):
+            file_id = video['file_id']
+            file_name = video.get('file_name', 'video.mp4')
+            file_ext = os.path.splitext(file_name)[1] or '.mp4'
+            unique_filename = f"{uuid.uuid4()}{file_ext}"
+            file_path = os.path.join(MEDIA_FOLDER, unique_filename)
+            
+            # Download and process
+            if download_file(file_id, file_path):
+                stream_url = f"{BASE_URL}/media/{unique_filename}"
+                response_text = (
+                    "🎬 VLC Streaming Link:\n\n"
+                    f"{stream_url}\n\n"
+                    "1. Open VLC Player\n"
+                    "2. Media > Open Network Stream\n"
+                    "3. Paste above URL\n"
+                    "4. Click Play"
+                )
+            else:
+                response_text = "❌ Failed to process video. Please try again."
+            
+            telegram_request("sendMessage", {
+                "chat_id": chat_id,
+                "text": response_text
+            })
+        
+        return 'OK'
+    
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return 'ERROR', 500
+
+@app.route('/media/<filename>')
+def serve_media(filename):
+    """Serve video files"""
+    return send_from_directory(MEDIA_FOLDER, filename)
 
 @app.route('/')
 def health_check():
     return "Video Stream Bot is Running!", 200
 
-# Set webhook on startup
 def setup_webhook():
+    """Configure Telegram webhook"""
     try:
-        # Get Render URL
-        render_url = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
-        if not render_url:
-            # Use request context if available
-            render_url = request.host_url.rstrip('/') if request else "https://your-service.onrender.com"
+        webhook_url = f"{BASE_URL}/webhook"
+        response = telegram_request("setWebhook", {"url": webhook_url})
         
-        webhook_url = f"{render_url}/webhook"
-        
-        # Set webhook
-        bot.set_webhook(webhook_url)
-        logger.info(f"Webhook configured to: {webhook_url}")
-        
-        # Test message
-        bot.send_message(
-            chat_id=os.getenv('ADMIN_CHAT_ID'),
-            text=f"🤖 Bot started successfully!\nWebhook: {webhook_url}"
-        )
-        return True
+        if response and response.get('ok'):
+            logger.info(f"Webhook set to: {webhook_url}")
+            # Send admin notification
+            telegram_request("sendMessage", {
+                "chat_id": ADMIN_CHAT_ID,
+                "text": f"🤖 Bot started successfully!\nWebhook: {webhook_url}"
+            })
+            return True
+        else:
+            error = response.get('description') if response else "Unknown error"
+            logger.error(f"Webhook setup failed: {error}")
+            return False
     except Exception as e:
-        logger.error(f"Webhook setup failed: {e}")
+        logger.error(f"Webhook setup error: {e}")
         return False
 
-# Run webhook setup when app starts
-setup_webhook()
-
-def main():
-    app.run(host='0.0.0.0', port=PORT, debug=False)
-
+# Initialize on startup
 if __name__ == "__main__":
-    main()
+    # Set webhook
+    setup_webhook()
+    
+    # Start Flask server
+    app.run(host='0.0.0.0', port=PORT, debug=False)
