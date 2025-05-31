@@ -2,7 +2,6 @@ import os
 import logging
 import requests
 from flask import Flask, request
-from urllib.parse import quote
 
 # Configure logging
 logging.basicConfig(
@@ -30,14 +29,13 @@ def telegram_request(method, data=None):
         logger.error(f"Telegram API error: {e}")
         return None
 
-def get_vlc_url(file_id, file_name):
-    """Create VLC-compatible URL with Telegram's direct file path"""
-    # Format the URL as you requested
-    return f"https://api.telegram.org/file/bot{TOKEN}/documents/{quote(file_name)}?file_id={file_id}"
+def get_vlc_url(file_id):
+    """Create VLC-compatible URL that always ends with .mp4"""
+    return f"https://api.telegram.org/file/bot{TOKEN}/{file_id}/video.mp4"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle Telegram updates and provide working VLC links"""
+    """Handle Telegram updates and provide VLC-compatible links"""
     try:
         data = request.json
         message = data.get('message', {})
@@ -47,8 +45,8 @@ def webhook():
         if message.get('text') == '/start':
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
-                "text": "🎬 Send me any video file to get a working VLC streaming link!\n\n"
-                        "🔗 I'll provide a URL that plays directly in VLC\n"
+                "text": "🎬 Send me any video file to get a VLC streaming link!\n\n"
+                        "🔗 I'll provide a URL ending with .mp4\n"
                         "⏳ Links are valid for 1 hour\n"
                         "📦 Works with files of ANY size"
             })
@@ -58,10 +56,9 @@ def webhook():
         video = message.get('video') or message.get('document')
         if video and video.get('mime_type', '').startswith('video/'):
             file_id = video['file_id']
-            file_name = video.get('file_name', 'video.mp4')
             
             # Get VLC-compatible URL
-            vlc_url = get_vlc_url(file_id, file_name)
+            vlc_url = get_vlc_url(file_id)
             
             response_text = (
                 "🎬 VLC Streaming Link (valid 1 hour):\n\n"
@@ -100,7 +97,7 @@ def setup_webhook():
             telegram_request("sendMessage", {
                 "chat_id": ADMIN_CHAT_ID,
                 "text": f"🤖 Bot started successfully!\nWebhook: {webhook_url}\n"
-                        "Ready to provide VLC streaming links for files of ANY size!"
+                        "Ready to provide VLC streaming links ending with .mp4!"
             })
             return True
         else:
