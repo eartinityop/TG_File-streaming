@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 from flask import Flask, request, send_from_directory
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -29,9 +30,24 @@ def telegram_request(method, data=None):
         logger.error(f"Telegram API error: {e}")
         return None
 
+def get_vlc_compatible_url(file_id, file_name=None):
+    """Create a VLC-compatible URL with proper extension"""
+    # Default filename if not provided
+    if not file_name:
+        file_name = "video.mp4"
+    
+    # Clean filename to remove special characters
+    clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '', file_name)
+    
+    # Form the direct Telegram URL
+    direct_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_id}"
+    
+    # Create VLC-friendly URL with filename at the end
+    return f"{direct_url}/{clean_name}"
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle Telegram updates and provide direct streaming links"""
+    """Handle Telegram updates and provide VLC-compatible links"""
     try:
         data = request.json
         message = data.get('message', {})
@@ -41,9 +57,9 @@ def webhook():
         if message.get('text') == '/start':
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
-                "text": "🎬 Send me any video file to get a direct VLC streaming link!\n\n"
-                        "🔗 I'll provide a Telegram URL valid for 1 hour\n"
-                        "📺 Works with VLC's 'Open Network Stream'"
+                "text": "🎬 Send me any video file to get a VLC-compatible streaming link!\n\n"
+                        "🔗 I'll provide a URL that works directly in VLC\n"
+                        "⏳ Links are valid for 1 hour"
             })
             return 'OK'
         
@@ -51,13 +67,14 @@ def webhook():
         video = message.get('video') or message.get('document')
         if video and video.get('mime_type', '').startswith('video/'):
             file_id = video['file_id']
+            file_name = video.get('file_name', 'video.mp4')
             
-            # Directly form the streaming URL
-            stream_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_id}"
+            # Get VLC-compatible URL
+            vlc_url = get_vlc_compatible_url(file_id, file_name)
             
             response_text = (
-                "🎬 Direct Streaming Link (valid 1 hour):\n\n"
-                f"{stream_url}\n\n"
+                "🎬 VLC Streaming Link (valid 1 hour):\n\n"
+                f"{vlc_url}\n\n"
                 "1. Open VLC Player\n"
                 "2. Media > Open Network Stream\n"
                 "3. Paste above URL\n"
@@ -92,12 +109,12 @@ def setup_webhook():
             telegram_request("sendMessage", {
                 "chat_id": ADMIN_CHAT_ID,
                 "text": f"🤖 Bot started successfully!\nWebhook: {webhook_url}\n"
-                        "Ready to provide direct streaming links!"
+                        "Ready to provide VLC-compatible links!"
             })
             return True
         else:
             error = response.get('description') if response else "Unknown error"
-            logger.error(f"Webhook setup failed: {error}")
+            logger.error(f"Webhook setup failed: {e}")
             return False
     except Exception as e:
         logger.error(f"Webhook setup error: {e}")
