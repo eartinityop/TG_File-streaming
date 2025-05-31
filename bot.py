@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 from flask import Flask, request
-import re
+import mimetypes
 
 # Configure logging
 logging.basicConfig(
@@ -30,42 +30,17 @@ def telegram_request(method, data=None):
         logger.error(f"Telegram API error: {e}")
         return None
 
-def get_vlc_compatible_url(file_id, file_name=None):
-    """Get actual file path from Telegram and create VLC-compatible URL"""
-    # Get file information from Telegram
-    file_info = telegram_request("getFile", {"file_id": file_id})
-    if not file_info or not file_info.get('ok'):
-        logger.error(f"Failed to get file info: {file_info}")
-        return None
+def get_vlc_url(file_id, mime_type):
+    """Create VLC-compatible URL with proper extension"""
+    # Determine file extension from MIME type
+    ext = mimetypes.guess_extension(mime_type) or ".mp4"
     
-    file_path = file_info['result']['file_path']
-    
-    # Clean filename if provided
-    clean_name = "video.mp4"  # Default name
-    if file_name:
-        # Extract extension from original filename
-        if '.' in file_name:
-            ext = file_name.split('.')[-1]
-            if len(ext) > 5:  # Probably not a real extension
-                ext = "mp4"
-        else:
-            ext = "mp4"
-        clean_name = f"video.{ext}"
-    else:
-        # Try to get extension from file_path
-        if '.' in file_path:
-            ext = file_path.split('.')[-1]
-            if len(ext) > 5:  # Probably not a real extension
-                ext = "mp4"
-            clean_name = f"video.{ext}"
-    
-    # Create VLC-friendly URL
-    direct_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-    return f"{direct_url}?filename={clean_name}"
+    # Create VLC-friendly URL with extension
+    return f"https://api.telegram.org/file/bot{TOKEN}/{file_id}{ext}"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle Telegram updates and provide proper VLC-compatible links"""
+    """Handle Telegram updates and provide VLC-compatible links"""
     try:
         data = request.json
         message = data.get('message', {})
@@ -75,7 +50,7 @@ def webhook():
         if message.get('text') == '/start':
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
-                "text": "🎬 Send me any video file to get a proper VLC streaming link!\n\n"
+                "text": "🎬 Send me any video file to get a VLC streaming link!\n\n"
                         "🔗 I'll provide a URL that works directly in VLC\n"
                         "⏳ Links are valid for 1 hour"
             })
@@ -85,26 +60,20 @@ def webhook():
         video = message.get('video') or message.get('document')
         if video and video.get('mime_type', '').startswith('video/'):
             file_id = video['file_id']
-            file_name = video.get('file_name', 'video.mp4')
+            mime_type = video['mime_type']
             
             # Get VLC-compatible URL
-            vlc_url = get_vlc_compatible_url(file_id, file_name)
+            vlc_url = get_vlc_url(file_id, mime_type)
             
-            if vlc_url:
-                response_text = (
-                    "🎬 VLC Streaming Link (valid 1 hour):\n\n"
-                    f"{vlc_url}\n\n"
-                    "1. Open VLC Player\n"
-                    "2. Media > Open Network Stream\n"
-                    "3. Paste above URL\n"
-                    "4. Click Play\n\n"
-                    "⚠️ Note: Link expires in 1 hour"
-                )
-            else:
-                response_text = (
-                    "❌ Failed to generate streaming link\n\n"
-                    "Please try sending the file again or use a smaller video file."
-                )
+            response_text = (
+                "🎬 VLC Streaming Link (valid 1 hour):\n\n"
+                f"{vlc_url}\n\n"
+                "1. Open VLC Player\n"
+                "2. Media > Open Network Stream\n"
+                "3. Paste above URL\n"
+                "4. Click Play\n\n"
+                "⚠️ Note: Link expires in 1 hour"
+            )
             
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
