@@ -1,15 +1,9 @@
 import os
 import uuid
 import logging
-from flask import Flask, send_from_directory
+from flask import Flask, request, send_from_directory
 from telegram import Update
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CommandHandler
-)
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 
 # Configure logging
 logging.basicConfig(
@@ -20,33 +14,20 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET')
-RENDER_EXTERNAL_URL = os.getenv('RENDER_EXTERNAL_URL')
 MEDIA_FOLDER = "media"
+PORT = int(os.environ.get("PORT", 5000))
 
 # Ensure media folder exists
 os.makedirs(MEDIA_FOLDER, exist_ok=True)
 
-# Create Flask app for serving files
+# Create Flask app
 app = Flask(__name__)
 
-@app.route('/media/<filename>')
-def serve_media(filename):
-    """Serve video files through Flask"""
-    return send_from_directory(MEDIA_FOLDER, filename)
+# Create Telegram Application
+application = Application.builder().token(TOKEN).build()
 
-async def download_video(file_obj, context, filename):
-    """Download video file to server"""
-    file_path = os.path.join(MEDIA_FOLDER, filename)
-    
-    # Download the file
-    await file_obj.download_to_drive(custom_path=file_path)
-    
-    logger.info(f"Video saved: {filename}")
-    return f"{RENDER_EXTERNAL_URL}/media/{filename}"
-
+# Define handlers
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle video files and generate persistent links"""
     try:
         message = update.message
         
@@ -56,71 +37,75 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif message.document and message.document.mime_type.startswith('video/'):
             file_obj = message.document
         else:
-            await message.reply_text("Please send a video file (MP4, MKV, MOV, etc.)")
+            await message.reply_text("Please send a video file")
             return
 
         # Generate unique filename
-        file_ext = os.path.splitext(file_obj.file_name)[1] if file_obj.file_name else ".mp4"
+        file_name = file_obj.file_name or "video"
+        file_ext = os.path.splitext(file_name)[1] if '.' in file_name else '.mp4'
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         
-        # Get file object
-        tg_file = await context.bot.get_file(file_obj.file_id)
-        
         # Download file to server
-        stream_url = await download_video(tg_file, context, unique_filename)
+        tg_file = await context.bot.get_file(file_obj.file_id)
+        file_path = os.path.join(MEDIA_FOLDER, unique_filename)
+        await tg_file.download_to_drive(custom_path=file_path)
         
-        # Create response message
+        # Get base URL dynamically
+        base_url = request.host_url.rstrip('/')  # Uses current request's host
+        stream_url = f"{base_url}/media/{unique_filename}"
+        
+        # Create response
         response = (
-            "🎬 VLC Streaming Link (Persistent):\n\n"
+            "🎬 VLC Streaming Link:\n\n"
             f"`{stream_url}`\n\n"
-            "**How to use:**\n"
             "1. Open VLC Player\n"
-            "2. Go to Media > Open Network Stream\n"
-            "3. Paste this URL\n"
-            "4. Click Play\n\n"
-            "⚠️ Note: Link remains valid as long as server is running"
+            "2. Media > Open Network Stream\n"
+            "3. Paste above URL\n"
+            "4. Click Play"
         )
         
         await message.reply_text(response, parse_mode="Markdown")
         
     except Exception as e:
-        logger.error(f"Error processing video: {e}")
-        await message.reply_text("❌ Error processing video. Please try again.")
+        logger.error(f"Error: {e}")
+        await message.reply_text("❌ Error processing video")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message"""
     await update.message.reply_text(
-        "📹 Send me any video file to get a persistent VLC streaming link!\n\n"
-        "I'll store it on the server and generate a URL that works in VLC's Network Stream option."
+        "📹 Send me any video file to get a VLC streaming link!"
     )
 
-def run_bot():
-    """Start the Telegram bot"""
-    # Create application
-    application = Application.builder().token(TOKEN).build()
+# Register handlers
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(MessageHandler(
+    filters.VIDEO | (filters.DOCUMENT & filters.Document.MimeType("video/*")),
+    handle_video
+))
+
+# Flask route for serving media files
+@app.route('/media/<filename>')
+def serve_media(filename):
+    return send_from_directory(MEDIA_FOLDER, filename)
+
+# Flask route for Telegram webhook
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+    await application.update_queue.put(Update.de_json(request.json, application.bot))
+    return 'OK', 200
+
+@app.route('/')
+def health_check():
+    return "Video Stream Bot is Running!", 200
+
+def main():
+    # Set webhook on startup
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_URL', '')}/webhook"
+    if not webhook_url.startswith("https:///"):
+        application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
     
-    # Register handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(
-        filters.VIDEO | (filters.DOCUMENT & filters.Document.MimeType("video/*")),
-        handle_video
-    ))
-    
-    # Set up webhook for Render
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        webhook_url=f"{RENDER_EXTERNAL_URL}/telegram",
-        secret_token=WEBHOOK_SECRET
-    )
+    # Start Flask server
+    app.run(host='0.0.0.0', port=PORT)
 
 if __name__ == "__main__":
-    # Start Flask app in separate thread
-    from threading import Thread
-    Thread(target=app.run, kwargs={
-        'host': '0.0.0.0',
-        'port': int(os.environ.get("PORT", 5000))
-    }).start()
-    
-    # Start Telegram bot
-    run_bot()
+    main()
