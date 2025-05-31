@@ -32,18 +32,22 @@ def telegram_request(method, data=None):
         return None
 
 def get_vlc_url(file_id, file_size, file_name):
-    """Create VLC-compatible URL that works for all file sizes"""
+    """Create VLC-compatible URL that works for all file sizes and types"""
+    # Clean filename and ensure .mp4 extension
+    clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '', file_name)
+    if not clean_name.endswith('.mp4'):
+        clean_name = f"{clean_name.split('.')[0]}.mp4"
+    
     # For small files: Use getFile to get actual path
     if file_size <= MAX_FILE_SIZE:
         file_info = telegram_request("getFile", {"file_id": file_id})
         if file_info and file_info.get('ok'):
             file_path = file_info['result']['file_path']
-            return f"https://api.telegram.org/file/bot{TOKEN}/{file_path}?filename={file_name}"
+            # For manually uploaded files
+            if 'file_' in file_path and file_path.endswith('.mp4'):
+                return f"https://api.telegram.org/file/bot{TOKEN}/{file_path}?filename={clean_name}"
     
-    # For large files: Use direct URL pattern that works
-    clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '', file_name)
-    if not clean_name.endswith('.mp4'):
-        clean_name = f"{clean_name.split('.')[0]}.mp4"
+    # For pre-existing files and large files
     return f"https://api.telegram.org/file/bot{TOKEN}/documents/{clean_name}?file_id={file_id}"
 
 @app.route('/webhook', methods=['POST'])
@@ -61,7 +65,7 @@ def webhook():
                 "text": "🎬 Send me any video file to get a working VLC streaming link!\n\n"
                         "🔗 I'll provide a direct URL that plays in VLC\n"
                         "⏳ Links are valid for 1 hour\n"
-                        "📦 Works with files of ANY size"
+                        "📦 Works with files of ANY size and type"
             })
             return 'OK'
         
@@ -74,7 +78,7 @@ def webhook():
             
             # Get VLC-compatible URL
             vlc_url = get_vlc_url(file_id, file_size, file_name)
-            logger.info(f"Generated URL for {file_size} byte file: {vlc_url}")
+            logger.info(f"Generated URL: {vlc_url}")
             
             response_text = (
                 "🎬 VLC Streaming Link (valid 1 hour):\n\n"
@@ -113,7 +117,7 @@ def setup_webhook():
             telegram_request("sendMessage", {
                 "chat_id": ADMIN_CHAT_ID,
                 "text": f"🤖 Bot started successfully!\nWebhook: {webhook_url}\n"
-                        "Ready to provide VLC streaming links for files of ANY size!"
+                        "Ready to provide VLC streaming links!"
             })
             return True
         else:
