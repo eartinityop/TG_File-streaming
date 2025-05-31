@@ -28,7 +28,7 @@ app = Flask(__name__)
 application = Application.builder().token(TOKEN).build()
 
 # Define handlers
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message
         
@@ -38,7 +38,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif message.document and message.document.mime_type.startswith('video/'):
             file_obj = message.document
         else:
-            await message.reply_text("Please send a video file")
+            asyncio.run(message.reply_text("Please send a video file"))
             return
 
         # Generate unique filename
@@ -47,9 +47,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         unique_filename = f"{uuid.uuid4()}{file_ext}"
         
         # Download file to server
-        tg_file = await context.bot.get_file(file_obj.file_id)
+        tg_file = asyncio.run(context.bot.get_file(file_obj.file_id))
         file_path = os.path.join(MEDIA_FOLDER, unique_filename)
-        await tg_file.download_to_drive(custom_path=file_path)
+        asyncio.run(tg_file.download_to_drive(custom_path=file_path))
         
         # Get base URL dynamically
         base_url = request.host_url.rstrip('/')
@@ -65,16 +65,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. Click Play"
         )
         
-        await message.reply_text(response, parse_mode="Markdown")
+        asyncio.run(message.reply_text(response, parse_mode="Markdown"))
         
     except Exception as e:
         logger.error(f"Error: {e}")
-        await message.reply_text("❌ Error processing video")
+        asyncio.run(message.reply_text("❌ Error processing video"))
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    asyncio.run(update.message.reply_text(
         "📹 Send me any video file to get a VLC streaming link!"
-    )
+    ))
 
 # Register handlers
 application.add_handler(CommandHandler("start", start_command))
@@ -88,10 +88,12 @@ application.add_handler(MessageHandler(
 def serve_media(filename):
     return send_from_directory(MEDIA_FOLDER, filename)
 
-# Flask route for Telegram webhook
+# Flask route for Telegram webhook (SYNCHRONOUS)
 @app.route('/webhook', methods=['POST'])
-async def webhook():
-    await application.update_queue.put(Update.de_json(request.json, application.bot))
+def webhook():
+    # Process update synchronously
+    update = Update.de_json(request.json, application.bot)
+    application.update_queue.put(update)
     return 'OK', 200
 
 @app.route('/')
@@ -104,23 +106,19 @@ def setup_webhook():
         # Get Render URL from environment
         render_url = os.getenv('RENDER_EXTERNAL_URL', '').rstrip('/')
         
-        # If not set, use a placeholder (should be set in production)
         if not render_url:
-            logger.warning("RENDER_EXTERNAL_URL not set. Using fallback URL")
+            # Try to determine from request context (works after first request)
             render_url = "https://your-service-name.onrender.com"
+            logger.warning(f"Using fallback URL: {render_url}")
         
         webhook_url = f"{render_url}/webhook"
         
-        # Set webhook asynchronously
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.bot.set_webhook(webhook_url))
+        # Set webhook
+        application.bot.set_webhook(webhook_url)
         logger.info(f"Webhook configured to: {webhook_url}")
         
-        return True
     except Exception as e:
         logger.error(f"Webhook setup failed: {e}")
-        return False
 
 # Run webhook setup when application starts
 setup_webhook()
