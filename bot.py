@@ -31,7 +31,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message
         
-        # Determine file type
+        # Determine file type (using updated filters)
         if message.video:
             file_obj = message.video
         elif message.document and message.document.mime_type.startswith('video/'):
@@ -75,10 +75,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📹 Send me any video file to get a VLC streaming link!"
     )
 
-# Register handlers
+# Register handlers with updated filters
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(MessageHandler(
-    filters.VIDEO | (filters.DOCUMENT & filters.Document.MimeType("video/*")),
+    filters.VIDEO | (filters.ATTACHMENT & filters.Document.MimeType("video/*")),
     handle_video
 ))
 
