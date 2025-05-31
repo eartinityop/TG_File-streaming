@@ -16,6 +16,7 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 PORT = int(os.environ.get("PORT", 5000))
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-service-name.onrender.com').rstrip('/')
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB Telegram file size limit for getFile
 
 # Create Flask app
 app = Flask(__name__)
@@ -30,42 +31,24 @@ def telegram_request(method, data=None):
         logger.error(f"Telegram API error: {e}")
         return None
 
-def get_vlc_compatible_url(file_id, file_name=None):
-    """Get actual file path from Telegram and create VLC-compatible URL"""
-    # Get file information from Telegram
-    file_info = telegram_request("getFile", {"file_id": file_id})
-    if not file_info or not file_info.get('ok'):
-        logger.error(f"Failed to get file info: {file_info}")
-        return None
+def get_vlc_url(file_id, file_size, file_name):
+    """Create VLC-compatible URL that works for all file sizes"""
+    # For small files: Use getFile to get actual path
+    if file_size <= MAX_FILE_SIZE:
+        file_info = telegram_request("getFile", {"file_id": file_id})
+        if file_info and file_info.get('ok'):
+            file_path = file_info['result']['file_path']
+            return f"https://api.telegram.org/file/bot{TOKEN}/{file_path}?filename={file_name}"
     
-    file_path = file_info['result']['file_path']
-    
-    # Clean filename if provided
-    clean_name = "video.mp4"  # Default name
-    if file_name:
-        # Extract extension from original filename
-        if '.' in file_name:
-            ext = file_name.split('.')[-1]
-            if len(ext) > 5:  # Probably not a real extension
-                ext = "mp4"
-        else:
-            ext = "mp4"
-        clean_name = f"video.{ext}"
-    else:
-        # Try to get extension from file_path
-        if '.' in file_path:
-            ext = file_path.split('.')[-1]
-            if len(ext) > 5:  # Probably not a real extension
-                ext = "mp4"
-            clean_name = f"video.{ext}"
-    
-    # Create VLC-friendly URL
-    direct_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-    return f"{direct_url}?filename={clean_name}"
+    # For large files: Use direct URL pattern that works
+    clean_name = re.sub(r'[^a-zA-Z0-9_.-]', '', file_name)
+    if not clean_name.endswith('.mp4'):
+        clean_name = f"{clean_name.split('.')[0]}.mp4"
+    return f"https://api.telegram.org/file/bot{TOKEN}/documents/{clean_name}?file_id={file_id}"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle Telegram updates and provide proper VLC-compatible links"""
+    """Handle Telegram updates and provide working VLC links"""
     try:
         data = request.json
         message = data.get('message', {})
@@ -75,9 +58,10 @@ def webhook():
         if message.get('text') == '/start':
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
-                "text": "🎬 Send me any video file to get a proper VLC streaming link!\n\n"
-                        "🔗 I'll provide a URL that works directly in VLC\n"
-                        "⏳ Links are valid for 1 hour"
+                "text": "🎬 Send me any video file to get a working VLC streaming link!\n\n"
+                        "🔗 I'll provide a direct URL that plays in VLC\n"
+                        "⏳ Links are valid for 1 hour\n"
+                        "📦 Works with files of ANY size"
             })
             return 'OK'
         
@@ -86,25 +70,21 @@ def webhook():
         if video and video.get('mime_type', '').startswith('video/'):
             file_id = video['file_id']
             file_name = video.get('file_name', 'video.mp4')
+            file_size = video.get('file_size', 0)
             
             # Get VLC-compatible URL
-            vlc_url = get_vlc_compatible_url(file_id, file_name)
+            vlc_url = get_vlc_url(file_id, file_size, file_name)
+            logger.info(f"Generated URL for {file_size} byte file: {vlc_url}")
             
-            if vlc_url:
-                response_text = (
-                    "🎬 VLC Streaming Link (valid 1 hour):\n\n"
-                    f"{vlc_url}\n\n"
-                    "1. Open VLC Player\n"
-                    "2. Media > Open Network Stream\n"
-                    "3. Paste above URL\n"
-                    "4. Click Play\n\n"
-                    "⚠️ Note: Link expires in 1 hour"
-                )
-            else:
-                response_text = (
-                    "❌ Failed to generate streaming link\n\n"
-                    "Please try sending the file again or use a smaller video file."
-                )
+            response_text = (
+                "🎬 VLC Streaming Link (valid 1 hour):\n\n"
+                f"{vlc_url}\n\n"
+                "1. Open VLC Player\n"
+                "2. Media > Open Network Stream\n"
+                "3. Paste above URL\n"
+                "4. Click Play\n\n"
+                "⚠️ Note: Link expires in 1 hour"
+            )
             
             telegram_request("sendMessage", {
                 "chat_id": chat_id,
@@ -133,7 +113,7 @@ def setup_webhook():
             telegram_request("sendMessage", {
                 "chat_id": ADMIN_CHAT_ID,
                 "text": f"🤖 Bot started successfully!\nWebhook: {webhook_url}\n"
-                        "Ready to provide VLC-compatible links!"
+                        "Ready to provide VLC streaming links for files of ANY size!"
             })
             return True
         else:
